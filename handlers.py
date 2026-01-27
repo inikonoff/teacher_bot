@@ -1,4 +1,3 @@
-from datetime import datetime, timedelta
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
@@ -117,7 +116,6 @@ async def handle_photo(message: Message, state: FSMContext, vision, groq, cache,
     is_educational, check_message = await vision.check_content(image_bytes.read())
     
     if not is_educational:
-        # Вежливый отказ без наказания
         await message.answer(
             f"😊 {check_message}\n\n"
             "Отправьте фото страницы учебника, тетради или задания, и я помогу разобраться!"
@@ -135,8 +133,9 @@ async def handle_photo(message: Message, state: FSMContext, vision, groq, cache,
         return
     
     # Показываем распознанный текст
+    preview = extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text
     await message.answer(
-        f"📝 *Распознанный текст:*\n\n{extracted_text[:500]}{'...' if len(extracted_text) > 500 else ''}\n\n"
+        f"📝 *Распознанный текст:*\n\n{preview}\n\n"
         f"Обрабатываю...",
         parse_mode="Markdown"
     )
@@ -163,7 +162,6 @@ async def process_question(message, question: str, subject: str, groq, cache, db
     cached = await cache.get(subject, question)
     if cached:
         await message.answer(f"📚 {cached}")
-        # Логируем использование кеша
         await db.log_question(message.from_user.id, subject, question, from_cache=True)
         return
     
@@ -196,32 +194,6 @@ async def process_question(message, question: str, subject: str, groq, cache, db
         )
         print(f"Error processing question: {e}")
 
-@router.message(Command("stats"))
-async def cmd_stats(message: Message, db):
-    """Статистика использования (для владельца бота)"""
-    
-    # Проверка что это владелец (укажите свой user_id в config)
-    from config import Config
-    config = Config()
-    
-    if message.from_user.id not in config.ADMIN_IDS:
-        return
-    
-    stats = await db.get_stats()
-    subject_stats = await db.get_subject_stats()
-    
-    text = "📊 *Статистика бота Училка*\n\n"
-    text += f"👥 Всего пользователей: {stats['total_users']}\n"
-    text += f"❓ Всего вопросов: {stats['total_questions']}\n"
-    text += f"💾 Из кеша: {stats['cache_hits']} ({stats['cache_hit_rate']:.1f}%)\n\n"
-    text += "*Популярность предметов:*\n"
-    
-    for subj in subject_stats:
-        emoji = SUBJECTS.get(subj['subject'], '📚').split()[1]
-        text += f"{emoji} {subj['subject']}: {subj['count']} вопросов\n"
-    
-    await message.answer(text, parse_mode="Markdown")
-
 @router.message(Command("help"))
 async def cmd_help(message: Message):
     """Помощь по боту"""
@@ -237,6 +209,39 @@ async def cmd_help(message: Message):
         "💡 *Важно:* Я не решаю задачи за вас, а учу их решать!",
         parse_mode="Markdown"
     )
+
+# ====== АДМИН КОМАНДЫ ======
+
+@router.message(Command("admin"))
+async def cmd_admin_menu(message: Message):
+    """Меню админки"""
+    from config import Config
+    config = Config()
+    
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+    
+    text = """🎛 *Админ-панель бота Училка*
+
+Доступные команды:
+
+📊 *Статистика:*
+/stats - общая статистика
+/stats_today - статистика за сегодня
+/stats_week - статистика за неделю
+
+👥 *Пользователи:*
+/top_users - топ активных пользователей
+
+💾 *Кеш:*
+/cache_stats - статистика кеша
+/clear_cache - очистить старый кеш (>30 дней)
+
+🔧 *Система:*
+/health - проверка здоровья бота"""
+    
+    await message.answer(text, parse_mode="Markdown")
+
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, db):
     """Статистика использования"""
@@ -257,7 +262,7 @@ async def cmd_stats(message: Message, db):
     text += "*Популярность предметов:*\n"
     
     for subj in subject_stats:
-        emoji = SUBJECTS.get(subj['subject'], '📚').split()[1]
+        emoji = SUBJECTS.get(subj['subject'], '📚').split()[1] if subj['subject'] in SUBJECTS else '📚'
         name = SUBJECTS.get(subj['subject'], subj['subject']).split()[0]
         text += f"{emoji} {name}: {subj['count']} вопросов\n"
     
@@ -283,7 +288,7 @@ async def cmd_stats_today(message: Message, db):
     if stats['top_subjects']:
         text += "*Топ предметов сегодня:*\n"
         for subj in stats['top_subjects'][:3]:
-            emoji = SUBJECTS.get(subj['subject'], '📚').split()[1]
+            emoji = SUBJECTS.get(subj['subject'], '📚').split()[1] if subj['subject'] in SUBJECTS else '📚'
             text += f"{emoji} {subj['subject']}: {subj['count']}\n"
     
     await message.answer(text, parse_mode="Markdown")
@@ -355,37 +360,6 @@ async def cmd_cache_stats(message: Message, db):
     
     await message.answer(text, parse_mode="Markdown")
 
-@router.message(Command("admin"))
-async def cmd_admin_menu(message: Message):
-    """Меню админки"""
-    from config import Config
-    config = Config()
-    
-    if message.from_user.id not in config.ADMIN_IDS:
-        return
-    
-    text = """🎛 *Админ-панель бота Училка*
-
-Доступные команды:
-
-📊 *Статистика:*
-/stats - общая статистика
-/stats_today - статистика за сегодня
-/stats_week - статистика за неделю
-
-👥 *Пользователи:*
-/top_users - топ активных пользователей
-
-💾 *Кеш:*
-/cache_stats - статистика кеша
-/clear_cache - очистить старый кеш (>30 дней)
-
-🔧 *Система:*
-/health - проверка здоровья бота
-/broadcast - разослать сообщение всем (осторожно!)"""
-    
-    await message.answer(text, parse_mode="Markdown")
-
 @router.message(Command("health"))
 async def cmd_health(message: Message, db, groq):
     """Проверка здоровья системы"""
@@ -432,21 +406,5 @@ async def cmd_clear_cache(message: Message, db):
     await message.answer(
         f"🧹 Очищен кеш старше 30 дней\n\n"
         f"Удалено записей: {deleted}",
-        parse_mode="Markdown"
-    )
-
-@router.message(Command("broadcast"))
-async def cmd_broadcast(message: Message, state: FSMContext):
-    """Начать рассылку"""
-    from config import Config
-    config = Config()
-    
-    if message.from_user.id not in config.ADMIN_IDS:
-        return
-    
-    # Здесь можно добавить FSM для ввода текста рассылки
-    await message.answer(
-        "⚠️ *Рассылка временно отключена*\n\n"
-        "Для рассылки свяжитесь с разработчиком.",
         parse_mode="Markdown"
     )
