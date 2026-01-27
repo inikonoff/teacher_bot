@@ -1,7 +1,242 @@
-# handlers.py - добавить в конец файла
-
 from datetime import datetime, timedelta
+from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
+router = Router()
+
+class UserState(StatesGroup):
+    subject_selected = State()
+
+SUBJECTS = {
+    "math": "Математика 📐",
+    "english": "Английский язык 🇬🇧",
+    "german": "Немецкий язык 🇩🇪",
+    "french": "Французский язык 🇫🇷",
+    "russian": "Русский язык 📝",
+    "physics": "Физика ⚛️",
+    "chemistry": "Химия 🧪",
+}
+
+@router.message(Command("start"))
+async def cmd_start(message: Message, db):
+    user_id = message.from_user.id
+    
+    # Создаем пользователя если новый
+    user = await db.get_user(user_id)
+    if not user:
+        await db.create_user(user_id, message.from_user.username)
+    
+    # Инлайн кнопки выбора предмета
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=SUBJECTS["math"], callback_data="subject:math"),
+            InlineKeyboardButton(text=SUBJECTS["physics"], callback_data="subject:physics")
+        ],
+        [
+            InlineKeyboardButton(text=SUBJECTS["chemistry"], callback_data="subject:chemistry"),
+            InlineKeyboardButton(text=SUBJECTS["russian"], callback_data="subject:russian")
+        ],
+        [
+            InlineKeyboardButton(text=SUBJECTS["english"], callback_data="subject:english"),
+            InlineKeyboardButton(text=SUBJECTS["german"], callback_data="subject:german")
+        ],
+        [
+            InlineKeyboardButton(text=SUBJECTS["french"], callback_data="subject:french")
+        ]
+    ])
+    
+    await message.answer(
+        "🎓 Добро пожаловать в бот *Училка*!\n\n"
+        "Выберите предмет:",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+@router.callback_query(F.data.startswith("subject:"))
+async def select_subject(callback: CallbackQuery, state: FSMContext, db):
+    subject = callback.data.split(":")[1]
+    
+    await state.update_data(subject=subject)
+    await state.set_state(UserState.subject_selected)
+    
+    await db.update_user_subject(callback.from_user.id, subject)
+    
+    await callback.message.edit_text(
+        f"✅ Выбран предмет: *{SUBJECTS[subject]}*\n\n"
+        f"Здравствуйте, садитесь! 👋\n\n"
+        f"Я помогу разобраться с темами, но *не решаю задачи за вас*.\n"
+        f"Присылайте вопросы текстом или фото заданий.",
+        parse_mode="Markdown"
+    )
+
+@router.message(Command("change"))
+async def cmd_change_subject(message: Message):
+    """Сменить предмет"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text=SUBJECTS["math"], callback_data="subject:math"),
+            InlineKeyboardButton(text=SUBJECTS["physics"], callback_data="subject:physics")
+        ],
+        [
+            InlineKeyboardButton(text=SUBJECTS["chemistry"], callback_data="subject:chemistry"),
+            InlineKeyboardButton(text=SUBJECTS["russian"], callback_data="subject:russian")
+        ],
+        [
+            InlineKeyboardButton(text=SUBJECTS["english"], callback_data="subject:english"),
+            InlineKeyboardButton(text=SUBJECTS["german"], callback_data="subject:german")
+        ],
+        [
+            InlineKeyboardButton(text=SUBJECTS["french"], callback_data="subject:french")
+        ]
+    ])
+    
+    await message.answer(
+        "Выберите новый предмет:",
+        reply_markup=keyboard
+    )
+
+@router.message(F.photo)
+async def handle_photo(message: Message, state: FSMContext, vision, groq, cache, db):
+    user_id = message.from_user.id
+    data = await state.get_data()
+    subject = data.get('subject')
+    
+    if not subject:
+        await message.answer("Сначала выберите предмет через /start")
+        return
+    
+    # Скачиваем фото
+    photo = message.photo[-1]
+    file = await message.bot.get_file(photo.file_id)
+    image_bytes = await message.bot.download_file(file.file_path)
+    
+    # Проверка контента (мягкая, без банов)
+    is_educational, check_message = await vision.check_content(image_bytes.read())
+    
+    if not is_educational:
+        # Вежливый отказ без наказания
+        await message.answer(
+            f"😊 {check_message}\n\n"
+            "Отправьте фото страницы учебника, тетради или задания, и я помогу разобраться!"
+        )
+        return
+    
+    # OCR
+    await message.answer("🔍 Распознаю текст с изображения...")
+    
+    image_bytes.seek(0)
+    extracted_text = await vision.extract_text(image_bytes.read())
+    
+    if "не удалось" in extracted_text.lower():
+        await message.answer(extracted_text)
+        return
+    
+    # Показываем распознанный текст
+    await message.answer(
+        f"📝 *Распознанный текст:*\n\n{extracted_text[:500]}{'...' if len(extracted_text) > 500 else ''}\n\n"
+        f"Обрабатываю...",
+        parse_mode="Markdown"
+    )
+    
+    # Обработка как текстовый вопрос
+    await process_question(message, extracted_text, subject, groq, cache, db)
+
+@router.message(F.text)
+async def handle_text(message: Message, state: FSMContext, groq, cache, db):
+    user_id = message.from_user.id
+    data = await state.get_data()
+    subject = data.get('subject')
+    
+    if not subject:
+        await message.answer("Выберите предмет через /start")
+        return
+    
+    await process_question(message, message.text, subject, groq, cache, db)
+
+async def process_question(message, question: str, subject: str, groq, cache, db):
+    """Основная логика обработки вопроса"""
+    
+    # Проверка кеша
+    cached = await cache.get(subject, question)
+    if cached:
+        await message.answer(f"📚 {cached}")
+        # Логируем использование кеша
+        await db.log_question(message.from_user.id, subject, question, from_cache=True)
+        return
+    
+    # Запрос к Groq
+    from prompts import get_system_prompt
+    
+    messages = [
+        {"role": "system", "content": get_system_prompt(subject)},
+        {"role": "user", "content": question}
+    ]
+    
+    try:
+        response = await groq.get_response(messages)
+        
+        # Сохранение в кеш
+        await cache.set(subject, question, response)
+        
+        # Логируем вопрос
+        await db.log_question(message.from_user.id, subject, question, from_cache=False)
+        
+        await message.answer(f"📚 {response}")
+        
+    except Exception as e:
+        await message.answer(
+            "😔 Извините, произошла временная ошибка.\n\n"
+            "Попробуйте:\n"
+            "• Переформулировать вопрос\n"
+            "• Подождать минуту\n"
+            "• Написать вопрос покороче"
+        )
+        print(f"Error processing question: {e}")
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message, db):
+    """Статистика использования (для владельца бота)"""
+    
+    # Проверка что это владелец (укажите свой user_id в config)
+    from config import Config
+    config = Config()
+    
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+    
+    stats = await db.get_stats()
+    subject_stats = await db.get_subject_stats()
+    
+    text = "📊 *Статистика бота Училка*\n\n"
+    text += f"👥 Всего пользователей: {stats['total_users']}\n"
+    text += f"❓ Всего вопросов: {stats['total_questions']}\n"
+    text += f"💾 Из кеша: {stats['cache_hits']} ({stats['cache_hit_rate']:.1f}%)\n\n"
+    text += "*Популярность предметов:*\n"
+    
+    for subj in subject_stats:
+        emoji = SUBJECTS.get(subj['subject'], '📚').split()[1]
+        text += f"{emoji} {subj['subject']}: {subj['count']} вопросов\n"
+    
+    await message.answer(text, parse_mode="Markdown")
+
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    """Помощь по боту"""
+    await message.answer(
+        "🎓 *Как пользоваться ботом Училка:*\n\n"
+        "1️⃣ Выберите предмет через /start\n"
+        "2️⃣ Отправьте вопрос текстом или фото задания\n"
+        "3️⃣ Получите объяснение (но не готовое решение!)\n\n"
+        "*Команды:*\n"
+        "/start - выбрать предмет\n"
+        "/change - сменить предмет\n"
+        "/help - эта справка\n\n"
+        "💡 *Важно:* Я не решаю задачи за вас, а учу их решать!",
+        parse_mode="Markdown"
+    )
 @router.message(Command("stats"))
 async def cmd_stats(message: Message, db):
     """Статистика использования"""
