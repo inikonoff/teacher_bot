@@ -213,11 +213,8 @@ async def cmd_help(message: Message):
 # ====== АДМИН КОМАНДЫ ======
 
 @router.message(Command("admin"))
-async def cmd_admin_menu(message: Message):
+async def cmd_admin_menu(message: Message, config):  # ← config из middleware
     """Меню админки"""
-    from config import Config
-    config = Config()
-    
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -243,11 +240,8 @@ async def cmd_admin_menu(message: Message):
     await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("stats"))
-async def cmd_stats(message: Message, db):
+async def cmd_stats(message: Message, db, config):  # ← config из middleware
     """Статистика использования"""
-    from config import Config
-    config = Config()
-    
     if message.from_user.id not in config.ADMIN_IDS:
         await message.answer("У вас нет доступа к статистике.")
         return
@@ -269,11 +263,8 @@ async def cmd_stats(message: Message, db):
     await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("stats_today"))
-async def cmd_stats_today(message: Message, db):
+async def cmd_stats_today(message: Message, db, config):  # ← config из middleware
     """Статистика за сегодня"""
-    from config import Config
-    config = Config()
-    
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -294,11 +285,8 @@ async def cmd_stats_today(message: Message, db):
     await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("stats_week"))
-async def cmd_stats_week(message: Message, db):
+async def cmd_stats_week(message: Message, db, config):  # ← config из middleware
     """Статистика за неделю"""
-    from config import Config
-    config = Config()
-    
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -317,11 +305,8 @@ async def cmd_stats_week(message: Message, db):
     await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("top_users"))
-async def cmd_top_users(message: Message, db):
+async def cmd_top_users(message: Message, db, config):  # ← config из middleware
     """Топ активных пользователей"""
-    from config import Config
-    config = Config()
-    
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -338,11 +323,8 @@ async def cmd_top_users(message: Message, db):
     await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("cache_stats"))
-async def cmd_cache_stats(message: Message, db):
+async def cmd_cache_stats(message: Message, db, config):  # ← config из middleware
     """Статистика кеша"""
-    from config import Config
-    config = Config()
-    
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -361,11 +343,8 @@ async def cmd_cache_stats(message: Message, db):
     await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("health"))
-async def cmd_health(message: Message, db, groq):
+async def cmd_health(message: Message, db, groq, config):  # ← config из middleware
     """Проверка здоровья системы"""
-    from config import Config
-    config = Config()
-    
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -393,11 +372,8 @@ async def cmd_health(message: Message, db, groq):
     await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("clear_cache"))
-async def cmd_clear_cache(message: Message, db):
+async def cmd_clear_cache(message: Message, db, config):  # ← config из middleware
     """Очистить старый кеш"""
-    from config import Config
-    config = Config()
-    
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -408,3 +384,26 @@ async def cmd_clear_cache(message: Message, db):
         f"Удалено записей: {deleted}",
         parse_mode="Markdown"
     )
+
+# ====== ОТЛАДОЧНАЯ КОМАНДА ======
+
+@router.message(Command("check_admin"))
+async def cmd_check_admin(message: Message, config):  # ← config из middleware
+    """Проверить права администратора (для отладки)"""
+    user_id = message.from_user.id
+    username = message.from_user.username or "отсутствует"
+    
+    debug_text = (
+        f"🔍 *Отладка ADMIN_IDS*\n\n"
+        f"👤 Ваш ID: `{user_id}`\n"
+        f"👤 Username: @{username}\n\n"
+        f"📦 ADMIN_IDS из конфига:\n"
+        f"• {config.ADMIN_IDS}\n\n"
+        f"✅ Вы администратор: {'ДА' if user_id in config.ADMIN_IDS else 'НЕТ'}\n\n"
+        f"📝 Команды доступны только если выше 'ДА'"
+    )
+    
+    await message.answer(debug_text, parse_mode="Markdown")
+    
+    # Вывод в консоль для проверки
+    print(f"[DEBUG] User ID: {user_id}, ADMIN_IDS: {config.ADMIN_IDS}, Is Admin: {user_id in config.ADMIN_IDS}")
