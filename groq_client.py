@@ -73,8 +73,8 @@ class GroqRouter:
                 response = client.chat.completions.create(
                     model=model,
                     messages=messages,
-                    temperature=0.7,
-                    max_tokens=1024,
+                    temperature=0.4,  # Было 0.7 - снижено для меньшей "креативности"
+                    max_tokens=384,   # Было 1024 - уменьшено для кратких ответов
                     top_p=0.9
                 )
                 return response.choices[0].message.content
