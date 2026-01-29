@@ -143,7 +143,8 @@ async def handle_photo(message: Message, state: FSMContext, vision, groq, cache,
     # Обработка как текстовый вопрос
     await process_question(message, extracted_text, subject, groq, cache, db)
 
-@router.message(F.text)
+# ====== ИСПРАВЛЕНИЕ: Этот хендлер должен быть ПОСЛЕ всех команд! ======
+@router.message(F.text & ~F.text.startswith('/'))  # ← Исключаем команды!
 async def handle_text(message: Message, state: FSMContext, groq, cache, db):
     user_id = message.from_user.id
     data = await state.get_data()
@@ -152,6 +153,10 @@ async def handle_text(message: Message, state: FSMContext, groq, cache, db):
     if not subject:
         await message.answer("Выберите предмет через /start")
         return
+    
+    # Проверяем, не является ли это командой
+    if message.text.startswith('/'):
+        return  # Пропускаем команды
     
     await process_question(message, message.text, subject, groq, cache, db)
 
