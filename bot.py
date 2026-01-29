@@ -50,6 +50,7 @@ async def main():
         data['vision'] = vision
         data['cache'] = cache
         data['db'] = db
+        data['config'] = config  # ← ДОБАВЬ config сюда!
         return await handler(event, data)
     
     @dp.callback_query.middleware()
@@ -58,12 +59,14 @@ async def main():
         data['vision'] = vision
         data['cache'] = cache
         data['db'] = db
+        data['config'] = config  # ← ДОБАВЬ config сюда!
         return await handler(event, data)
     
     dp.include_router(router)
     
     # Запускаем health-сервер и polling параллельно
     logger.info("Starting bot...")
+    logger.info(f"Admin IDs: {config.ADMIN_IDS}")  # ← Логируем для проверки
     
     await asyncio.gather(
         start_health_server(),
