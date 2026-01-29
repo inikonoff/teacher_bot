@@ -8,6 +8,7 @@ router = Router()
 
 class UserState(StatesGroup):
     subject_selected = State()
+    waiting_for_question = State()  # Новый state - ждем вопрос после фото
 
 SUBJECTS = {
     "math": "Математика 📐",
@@ -20,8 +21,11 @@ SUBJECTS = {
 }
 
 @router.message(Command("start"))
-async def cmd_start(message: Message, db):
+async def cmd_start(message: Message, db, state: FSMContext):
     user_id = message.from_user.id
+    
+    # Сбрасываем состояние
+    await state.clear()
     
     # Создаем пользователя если новый
     user = await db.get_user(user_id)
@@ -72,8 +76,10 @@ async def select_subject(callback: CallbackQuery, state: FSMContext, db):
     )
 
 @router.message(Command("change"))
-async def cmd_change_subject(message: Message):
+async def cmd_change_subject(message: Message, state: FSMContext):
     """Сменить предмет"""
+    await state.clear()
+    
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text=SUBJECTS["math"], callback_data="subject:math"),
@@ -98,7 +104,7 @@ async def cmd_change_subject(message: Message):
     )
 
 @router.message(F.photo)
-async def handle_photo(message: Message, state: FSMContext, vision, groq, cache, db):
+async def handle_photo(message: Message, state: FSMContext, vision, db):
     user_id = message.from_user.id
     data = await state.get_data()
     subject = data.get('subject')
@@ -128,37 +134,71 @@ async def handle_photo(message: Message, state: FSMContext, vision, groq, cache,
     image_bytes.seek(0)
     extracted_text = await vision.extract_text(image_bytes.read())
     
-    if "не удалось" in extracted_text.lower():
+    if "не удалось" in extracted_text.lower() or "ошибка" in extracted_text.lower():
         await message.answer(extracted_text)
         return
     
-    # Показываем распознанный текст
-    preview = extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text
+    # Генерируем краткий саммари
+    summary = await generate_summary(extracted_text, subject, vision)
+    
+    # КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: НЕ обрабатываем автоматически, а ЖДЕМ вопрос
+    await state.update_data(
+        last_recognized_text=extracted_text,
+        subject=subject
+    )
+    await state.set_state(UserState.waiting_for_question)
+    
+    # Показываем что распознали и ЖДЕМ вопрос
     await message.answer(
-        f"📝 *Распознанный текст:*\n\n{preview}\n\n"
-        f"Обрабатываю...",
+        f"📝 {summary}\n\n"
+        f"Слушаю ваш вопрос.",
         parse_mode="Markdown"
     )
-    
-    # Обработка как текстовый вопрос
-    await process_question(message, extracted_text, subject, groq, cache, db)
 
-# ====== ИСПРАВЛЕНИЕ: Этот хендлер должен быть ПОСЛЕ всех команд! ======
-@router.message(F.text & ~F.text.startswith('/'))  # ← Исключаем команды!
+@router.message(F.text)
 async def handle_text(message: Message, state: FSMContext, groq, cache, db):
     user_id = message.from_user.id
     data = await state.get_data()
+    current_state = await state.get_state()
+    
     subject = data.get('subject')
     
     if not subject:
         await message.answer("Выберите предмет через /start")
         return
     
-    # Проверяем, не является ли это командой
-    if message.text.startswith('/'):
-        return  # Пропускаем команды
+    # Проверяем - это вопрос после фото или обычный вопрос?
+    if current_state == UserState.waiting_for_question:
+        # Это вопрос по распознанному тексту
+        recognized_text = data.get('last_recognized_text', '')
+        
+        # Формируем контекст: распознанный текст + вопрос пользователя
+        full_question = f"Контекст (распознанный текст):\n{recognized_text}\n\nВопрос ученика: {message.text}"
+        
+        await process_question(message, full_question, subject, groq, cache, db)
+        
+        # Возвращаем в обычный режим
+        await state.set_state(UserState.subject_selected)
+        await state.update_data(last_recognized_text=None)
+    else:
+        # Обычный текстовый вопрос без фото
+        await process_question(message, message.text, subject, groq, cache, db)
+
+async def generate_summary(text: str, subject: str, vision) -> str:
+    """Генерирует краткий саммари распознанного текста"""
     
-    await process_question(message, message.text, subject, groq, cache, db)
+    # Простая эвристика для саммари
+    text_preview = text[:150].strip()
+    
+    # Определяем тип контента
+    if any(word in text.lower() for word in ['задание', 'упражнение', 'номер', '№']):
+        return f"Распознал задание. Вижу: *{text_preview}...*"
+    elif any(word in text.lower() for word in ['formula', 'формула', '=', 'x', 'y']):
+        return f"Распознал формулы/уравнения. Вижу: *{text_preview}...*"
+    elif len(text) < 100:
+        return f"Распознал текст: *{text}*"
+    else:
+        return f"Распознал текст. Начало: *{text_preview}...*"
 
 async def process_question(message, question: str, subject: str, groq, cache, db):
     """Основная логика обработки вопроса"""
@@ -205,8 +245,9 @@ async def cmd_help(message: Message):
     await message.answer(
         "🎓 *Как пользоваться ботом Училка:*\n\n"
         "1️⃣ Выберите предмет через /start\n"
-        "2️⃣ Отправьте вопрос текстом или фото задания\n"
-        "3️⃣ Получите объяснение (но не готовое решение!)\n\n"
+        "2️⃣ Отправьте фото задания или текстовый вопрос\n"
+        "3️⃣ Если отправили фото - напишите вопрос по нему\n"
+        "4️⃣ Получите краткое объяснение\n\n"
         "*Команды:*\n"
         "/start - выбрать предмет\n"
         "/change - сменить предмет\n"
@@ -218,8 +259,11 @@ async def cmd_help(message: Message):
 # ====== АДМИН КОМАНДЫ ======
 
 @router.message(Command("admin"))
-async def cmd_admin_menu(message: Message, config):  # ← config из middleware
+async def cmd_admin_menu(message: Message):
     """Меню админки"""
+    from config import Config
+    config = Config()
+    
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -245,8 +289,11 @@ async def cmd_admin_menu(message: Message, config):  # ← config из middlewar
     await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("stats"))
-async def cmd_stats(message: Message, db, config):  # ← config из middleware
+async def cmd_stats(message: Message, db):
     """Статистика использования"""
+    from config import Config
+    config = Config()
+    
     if message.from_user.id not in config.ADMIN_IDS:
         await message.answer("У вас нет доступа к статистике.")
         return
@@ -268,8 +315,11 @@ async def cmd_stats(message: Message, db, config):  # ← config из middleware
     await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("stats_today"))
-async def cmd_stats_today(message: Message, db, config):  # ← config из middleware
+async def cmd_stats_today(message: Message, db):
     """Статистика за сегодня"""
+    from config import Config
+    config = Config()
+    
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -290,8 +340,11 @@ async def cmd_stats_today(message: Message, db, config):  # ← config из midd
     await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("stats_week"))
-async def cmd_stats_week(message: Message, db, config):  # ← config из middleware
+async def cmd_stats_week(message: Message, db):
     """Статистика за неделю"""
+    from config import Config
+    config = Config()
+    
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -310,8 +363,11 @@ async def cmd_stats_week(message: Message, db, config):  # ← config из middl
     await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("top_users"))
-async def cmd_top_users(message: Message, db, config):  # ← config из middleware
+async def cmd_top_users(message: Message, db):
     """Топ активных пользователей"""
+    from config import Config
+    config = Config()
+    
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -328,8 +384,11 @@ async def cmd_top_users(message: Message, db, config):  # ← config из middle
     await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("cache_stats"))
-async def cmd_cache_stats(message: Message, db, config):  # ← config из middleware
+async def cmd_cache_stats(message: Message, db):
     """Статистика кеша"""
+    from config import Config
+    config = Config()
+    
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -348,8 +407,11 @@ async def cmd_cache_stats(message: Message, db, config):  # ← config из midd
     await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("health"))
-async def cmd_health(message: Message, db, groq, config):  # ← config из middleware
+async def cmd_health(message: Message, db, groq):
     """Проверка здоровья системы"""
+    from config import Config
+    config = Config()
+    
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -377,8 +439,11 @@ async def cmd_health(message: Message, db, groq, config):  # ← config из mid
     await message.answer(text, parse_mode="Markdown")
 
 @router.message(Command("clear_cache"))
-async def cmd_clear_cache(message: Message, db, config):  # ← config из middleware
+async def cmd_clear_cache(message: Message, db):
     """Очистить старый кеш"""
+    from config import Config
+    config = Config()
+    
     if message.from_user.id not in config.ADMIN_IDS:
         return
     
@@ -389,26 +454,3 @@ async def cmd_clear_cache(message: Message, db, config):  # ← config из midd
         f"Удалено записей: {deleted}",
         parse_mode="Markdown"
     )
-
-# ====== ОТЛАДОЧНАЯ КОМАНДА ======
-
-@router.message(Command("check_admin"))
-async def cmd_check_admin(message: Message, config):  # ← config из middleware
-    """Проверить права администратора (для отладки)"""
-    user_id = message.from_user.id
-    username = message.from_user.username or "отсутствует"
-    
-    debug_text = (
-        f"🔍 *Отладка ADMIN_IDS*\n\n"
-        f"👤 Ваш ID: `{user_id}`\n"
-        f"👤 Username: @{username}\n\n"
-        f"📦 ADMIN_IDS из конфига:\n"
-        f"• {config.ADMIN_IDS}\n\n"
-        f"✅ Вы администратор: {'ДА' if user_id in config.ADMIN_IDS else 'НЕТ'}\n\n"
-        f"📝 Команды доступны только если выше 'ДА'"
-    )
-    
-    await message.answer(debug_text, parse_mode="Markdown")
-    
-    # Вывод в консоль для проверки
-    print(f"[DEBUG] User ID: {user_id}, ADMIN_IDS: {config.ADMIN_IDS}, Is Admin: {user_id in config.ADMIN_IDS}")
