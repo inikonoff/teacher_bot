@@ -3,6 +3,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+import re
 
 router = Router()
 
@@ -19,6 +20,65 @@ SUBJECTS = {
     "physics": "Физика ⚛️",
     "chemistry": "Химия 🧪",
 }
+
+def beautify_math(text: str) -> str:
+    """Красивая запись математических выражений"""
+    
+    # Карта для надстрочных символов (степени)
+    SUPERSCRIPT = {
+        '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
+        '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+        '-': '⁻', '+': '⁺'
+    }
+    
+    # Карта простых дробей
+    FRACTIONS = {
+        '1/2': '½', '1/3': '⅓', '2/3': '⅔', '1/4': '¼', '3/4': '¾',
+        '1/5': '⅕', '2/5': '⅖', '3/5': '⅗', '4/5': '⅘',
+        '1/6': '⅙', '5/6': '⅚', '1/8': '⅛', '3/8': '⅜', '5/8': '⅝', '7/8': '⅞'
+    }
+    
+    # 1. Заменяем степени: x^2 → x²
+    def replace_power(match):
+        base = match.group(1)
+        power = match.group(2)
+        superscript = ''.join(SUPERSCRIPT.get(c, c) for c in power)
+        return f"{base}{superscript}"
+    
+    # Паттерн: буква/число/скобка + ^ + число (включая отрицательные)
+    text = re.sub(r'([a-zA-Zа-яА-Я0-9\)])\^(-?\d+)', replace_power, text)
+    
+    # 2. Заменяем квадратные корни: sqrt(...) → √(...)
+    # Сначала обрабатываем sqrt с содержимым в скобках
+    text = re.sub(r'sqrt\s*\(([^)]+)\)', r'√(\1)', text)
+    # Потом sqrt без скобок (для простых чисел)
+    text = re.sub(r'sqrt\s+(\d+)', r'√(\1)', text)
+    text = re.sub(r'sqrt(\d+)', r'√(\1)', text)
+    
+    # 3. Заменяем простые дроби: 1/2 → ½
+    # Только если это standalone дробь (не часть URL или пути)
+    for frac, symbol in FRACTIONS.items():
+        # Проверяем что это именно дробь, а не часть URL
+        # Ищем паттерн: пробел или начало строки + дробь + пробел или конец/знак
+        text = re.sub(
+            r'(^|[\s=\(])' + re.escape(frac) + r'([\s\)\.,;:!?]|$)',
+            r'\1' + symbol + r'\2',
+            text
+        )
+    
+    # 4. Заменяем умножение: 2*x → 2·x (только между числом и буквой или буквой и числом)
+    # Число * буква
+    text = re.sub(r'(\d)\s*\*\s*([a-zA-Zа-яА-Я])', r'\1·\2', text)
+    # Буква * число
+    text = re.sub(r'([a-zA-Zа-яА-Я])\s*\*\s*(\d)', r'\1·\2', text)
+    # Буква * буква
+    text = re.sub(r'([a-zA-Zа-яА-Я])\s*\*\s*([a-zA-Zа-яА-Я])', r'\1·\2', text)
+    
+    # 5. Заменяем деление в контексте примеров: "30 / 5 = 6" → "30 ÷ 5 = 6"
+    # Только если это число / число с пробелами и знаком равно рядом
+    text = re.sub(r'(\d+)\s*/\s*(\d+)\s*=', r'\1 ÷ \2 =', text)
+    
+    return text
 
 @router.message(Command("start"))
 async def cmd_start(message: Message, db, state: FSMContext):
@@ -206,7 +266,9 @@ async def process_question(message, question: str, subject: str, groq, cache, db
     # Проверка кеша
     cached = await cache.get(subject, question)
     if cached:
-        await message.answer(f"📚 {cached}")
+        # Применяем beautification к закешированному ответу
+        beautified = beautify_math(cached)
+        await message.answer(f"📚 {beautified}")
         await db.log_question(message.from_user.id, subject, question, from_cache=True)
         return
     
@@ -221,13 +283,16 @@ async def process_question(message, question: str, subject: str, groq, cache, db
     try:
         response = await groq.get_response(messages)
         
-        # Сохранение в кеш
+        # Применяем beautification к ответу
+        beautified_response = beautify_math(response)
+        
+        # Сохранение в кеш (оригинальный ответ, beautify применяется при выдаче)
         await cache.set(subject, question, response)
         
         # Логируем вопрос
         await db.log_question(message.from_user.id, subject, question, from_cache=False)
         
-        await message.answer(f"📚 {response}")
+        await message.answer(f"📚 {beautified_response}")
         
     except Exception as e:
         await message.answer(
