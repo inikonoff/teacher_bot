@@ -1,5 +1,6 @@
 from groq import Groq
 import base64
+import asyncio
 
 class VisionProcessor:
     def __init__(self, groq_router):
@@ -9,6 +10,7 @@ class VisionProcessor:
         """
         Проверка изображения на образовательный контент
         Возвращает: (is_educational, message)
+        Timeout: 20 секунд
         """
         
         # Базовые проверки
@@ -19,15 +21,18 @@ class VisionProcessor:
         client = self.groq.get_client()
         
         try:
-            response = client.chat.completions.create(
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": """Analyze this image. Respond ONLY with JSON:
+            # Добавляем timeout 20 секунд
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    client.chat.completions.create,
+                    model="meta-llama/llama-4-scout-17b-16e-instruct",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": """Analyze this image. Respond ONLY with JSON:
 {
   "is_educational": true/false,
   "content_type": "homework/textbook/notes/diagram/inappropriate/unclear/other"
@@ -44,18 +49,20 @@ Non-educational (but respond politely):
 - Screenshots of unrelated content
 - Blurry/unclear images
 - Inappropriate content (handle with care)"""
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}"
+                                    }
                                 }
-                            }
-                        ]
-                    }
-                ],
-                temperature=0.2,
-                max_tokens=150
+                            ]
+                        }
+                    ],
+                    temperature=0.2,
+                    max_tokens=150
+                ),
+                timeout=20.0
             )
             
             result = response.choices[0].message.content
@@ -76,28 +83,39 @@ Non-educational (but respond politely):
                 return False, message
             
             return True, "OK"
+        
+        except asyncio.TimeoutError:
+            print("Vision check timeout after 20 seconds")
+            # При таймауте - пропускаем (benefit of doubt)
+            return True, "OK"
             
         except Exception as e:
-            # При ошибке - пропускаем изображение (benefit of doubt)
+            # При других ошибках - тоже пропускаем
             print(f"Vision check error: {e}")
             return True, "OK"
     
     async def extract_text(self, image_bytes: bytes) -> str:
-        """OCR через Groq Vision"""
+        """
+        OCR через Groq Vision
+        Timeout: 45 секунд
+        """
         
         base64_image = base64.b64encode(image_bytes).decode('utf-8')
         client = self.groq.get_client()
         
         try:
-            response = client.chat.completions.create(
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": """Распознай и перепиши ВЕСЬ текст с этого изображения.
+            # Добавляем timeout 45 секунд (OCR может быть медленнее)
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    client.chat.completions.create,
+                    model="meta-llama/llama-4-scout-17b-16e-instruct",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": """Распознай и перепиши ВЕСЬ текст с этого изображения.
 Сохрани:
 - Нумерацию заданий
 - Математические формулы и выражения
@@ -105,21 +123,26 @@ Non-educational (but respond politely):
 - Условия задач
 
 Если текст на иностранном языке - сохрани его как есть."""
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_image}"
+                                    }
                                 }
-                            }
-                        ]
-                    }
-                ],
-                temperature=0.1,
-                max_tokens=2048
+                            ]
+                        }
+                    ],
+                    temperature=0.1,
+                    max_tokens=2048
+                ),
+                timeout=45.0
             )
             
             return response.choices[0].message.content
+        
+        except asyncio.TimeoutError:
+            return "Не удалось распознать текст за 45 секунд. Попробуйте сфотографировать ближе и четче, или разбейте на несколько фото."
         
         except Exception as e:
             return f"Не удалось распознать текст. Попробуйте сфотографировать четче: {e}"
