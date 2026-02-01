@@ -218,6 +218,11 @@ async def handle_photo(message: Message, state: FSMContext, vision, db):
 @router.message(F.text)
 async def handle_text(message: Message, state: FSMContext, groq, cache, db):
     user_id = message.from_user.id
+    
+    # Игнорируем команды - они обрабатываются отдельными хендлерами
+    if message.text.startswith('/'):
+        return
+    
     data = await state.get_data()
     current_state = await state.get_state()
     
