@@ -17,7 +17,7 @@ class GroqRouter:
         """
         Быстрая эвристика без LLM вызова
         Simple → llama-3.1-8b-instant (512 tok/s, дешевле по квоте)
-        Complex → llama-3.3-70b-versatile (128k context, умнее)
+        Complex → openai/gpt-oss-120b (128k context, умнее)
         """
         text_lower = text.lower()
         
@@ -50,7 +50,7 @@ class GroqRouter:
                 if pattern:
                     return "llama-3.3-70b-versatile"
             elif re.search(pattern, text_lower):
-                return "llama-3.3-70b-versatile"
+                return "openai/gpt-oss-120b"
         
         # Проверяем простые паттерны
         for pattern in simple_patterns:
@@ -61,7 +61,7 @@ class GroqRouter:
                 return "llama-3.1-8b-instant"
         
         # По умолчанию средняя модель
-        return "llama-3.3-70b-versatile"
+        return "openai/gpt-oss-120b"
     
     async def get_response(self, messages: list, max_retries: int = 3):
         """Запрос с fallback на другие API ключи"""
